@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<title>FSR Ratio Monitor (MQTT)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- Fonts -->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<!-- Paho MQTT over WebSocket(S) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/mqttws31.min.js"></script>
+<style>
+   :root{
+     --bg: #f6f7fb;
+     --card: #ffffff;
+     --text: #1f2937;
+     --muted:#6b7280;
+     --primary:#2563eb;
+     --danger:#dc2626;
+     --success:#16a34a;
+     --border:#e5e7eb;
+     --shadow: 0 8px 24px rgba(0,0,0,.06);
+     --radius:14px;
+   }
+   *{box-sizing:border-box}
+   html,body{height:100%}
+   body{
+     margin:0; background: radial-gradient(1200px 800px at 80% -10%, #e8efff 0%, transparent 60%) , var(--bg);
+     color:var(--text); font-family: Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;
+   }
+   .container{max-width:1100px; margin:32px auto; padding:0 20px}
+   header{
+     display:flex; align-items:center; gap:16px; margin-bottom:18px;
+   }
+   .logo{
+     width:46px; height:46px; display:grid; place-items:center; border-radius:12px;
+     background:linear-gradient(135deg,#5da3ff,#7e8cff); color:#fff; font-weight:700; box-shadow:var(--shadow)
+   }
+   h1{font-size:clamp(20px,2.4vw,28px); margin:0}
+   .subtitle{color:var(--muted); margin:4px 0 0}
+   .statusbar{
+     display:flex; align-items:center; gap:10px; margin:14px 0 22px;
+   }
+   .badge{
+     font-size:13px; font-weight:600; padding:6px 10px; border-radius:999px; border:1px solid var(--border);
+     background:#fff; color:var(--muted); display:inline-flex; align-items:center; gap:6px;
+   }
+   .badge.dot::before{
+     content:""; width:8px; height:8px; border-radius:50%; background: #9ca3af; display:inline-block;
+   }
+   .badge.connected{ color:var(--success); border-color:#c7f0d8; background:#eefcf3;}
+   .badge.connected.dot::before{ background: var(--success); }
+   .badge.disconnected{ color:var(--danger); border-color:#f5c9c9; background:#fff5f5;}
+   .badge.disconnected.dot::before{ background: var(--danger); }
+   .grid{
+     display:grid; gap:18px;
+     grid-template-columns: 1fr;
+   }
+   @media (min-width: 900px){
+     .grid{ grid-template-columns: 1fr 1fr; }
+   }
+   .card{
+     background:var(--card); border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow);
+     padding:18px 16px;
+   }
+   .card h2{
+     margin:0 0 8px; font-size:18px;
+   }
+   .help{color:var(--muted); font-size:13px; margin:0 0 12px}
+   .controls{
+     display:flex; align-items:center; gap:10px; margin:8px 0 6px; flex-wrap:wrap;
+   }
+   label{font-weight:600}
+   input[type="number"]{
+     width:160px; padding:10px 12px; border:1px solid var(--border); border-radius:10px; outline:none;
+     transition: .15s border-color, .15s box-shadow;
+   }
+   input[type="number"]:focus{ border-color: var(--primary); box-shadow:0 0 0 4px rgba(37,99,235,.12); }
+   .alert{
+     display:none; margin:10px 0 0; padding:10px 12px; border-radius:10px; border:1px solid #fecaca;
+     background:#fff1f2; color:#991b1b; font-weight:600;
+   }
+   canvas{ background:#fff; border:1px solid var(--border); border-radius:12px; padding:10px }
+   footer{
+     margin:22px 0 10px; color:var(--muted); font-size:12px; text-align:center;
+   }
+</style>
+</head>
+<body>
+<div class="container">
+<header>
+<div class="logo">FSR</div>
+<div>
+<h1>FSR → PVF Ratio Monitor</h1>
+<p class="subtitle">MQTT (WSS) • Realtime & Daily Average • Alert when ratio &gt; 1</p>
+</div>
+</header>
+<div class="statusbar">
+<span id="statusBadge" class="badge dot">Connecting…</span>
+<span class="badge">Topic: <code id="topicText">fsr/—</code></span>
+</div>
+<div class="card">
+<div class="controls">
+<label for="dogWeight">น้ำหนักสุนัข (กก.)</label>
+<input id="dogWeight" type="number" step="0.1" placeholder="เช่น 10" />
+<span class="help">กรอกน้ำหนักเพื่อคำนวณอัตราส่วน F/PVF</span>
+</div>
+<div id="alertBox" class="alert">⚠️ Ratio &gt; 1 — แรงขานี้เกินค่าที่ควรรับ!</div>
+</div>
+<div class="grid" style="margin-top:16px">
+<div class="card">
+<h2>Realtime Ratio (F/PVF)</h2>
+<canvas id="ratioChart"></canvas>
+</div>
+<div class="card">
+<h2>ค่าเฉลี่ยรายวันของอัตราส่วน (F/PVF)</h2>
+<canvas id="dailyAvgChart"></canvas>
+</div>
+</div>
+<footer>Designed for ESP32 + MQTT • Chart.js • Paho MQTT over WSS</footer>
+</div>
+<script>
+ /* ====== ตั้งค่า MQTT (เปลี่ยนเฉพาะ DEVICE_ID ให้ตรงกับ ESP32) ====== */
+ const DEVICE_ID = "fsr-esp32-001";                 // ← แก้ให้ตรง
+ const TOPIC     = "fsr/" + DEVICE_ID;              // ห้ามเว้นวรรค/ผิดตัวพิมพ์
+ document.getElementById('topicText').textContent = TOPIC;
+ // Mosquitto public broker (WSS)
+ const MQTT_HOST = "test.mosquitto.org";
+ const MQTT_PORT = 8081;  // WSS
+ const MQTT_PATH = "/mqtt";
+ /* ====== สร้างกราฟ ====== */
+ const ratioChart = new Chart(document.getElementById('ratioChart'), {
+   type:'line',
+   data:{labels:[], datasets:[{label:'Ratio (F/PVF)', data:[], borderColor:'#ef4444', borderWidth:2, tension:.25}]},
+   options:{scales:{x:{title:{display:true,text:'Time'}}, y:{beginAtZero:true, title:{display:true,text:'Ratio'}}}}
+ });
+ const dailyAvgChart = new Chart(document.getElementById('dailyAvgChart'), {
+   type:'line',
+   data:{labels:[], datasets:[{label:'Daily Avg Ratio', data:[], borderColor:'#3b82f6', borderWidth:2, tension:.2}]},
+   options:{scales:{x:{title:{display:true,text:'Date'}}, y:{beginAtZero:true, title:{display:true,text:'Daily Avg'}}}}
+ });
+ // ช่วยเฉลี่ยรายวัน
+ let currentDateKey = dateKey(new Date());
+ let dailySum = 0, dailyCount = 0;
+ function dateKey(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,'0')+"-"+String(d.getDate()).padStart(2,'0'); }
+ // UI องค์ประกอบ
+ const statusBadge = document.getElementById('statusBadge');
+ const alertBox = document.getElementById('alertBox');
+ function setBadge(state, text){
+   statusBadge.classList.remove('connected','disconnected');
+   statusBadge.textContent = text || "";
+   statusBadge.classList.add('badge','dot', state);
+ }
+ /* ====== เชื่อม MQTT (WSS) ====== */
+ const clientId = "web-" + Math.random().toString(16).slice(2);
+ const client = new Paho.MQTT.Client(MQTT_HOST, MQTT_PORT, MQTT_PATH, clientId);
+ client.onConnectionLost = (res) => {
+   setBadge('disconnected', 'Disconnected (retry in 3s)');
+   setTimeout(connectMQTT, 3000);
+ };
+ client.onMessageArrived = onMsg;
+ function connectMQTT(){
+   setBadge('', 'Connecting…');
+   client.connect({
+     useSSL:true, timeout:10, keepAliveInterval:30,
+     onSuccess: () => { setBadge('connected','Connected'); client.subscribe(TOPIC); },
+     onFailure: (err) => { setBadge('disconnected','Connect failed (retry in 3s)'); setTimeout(connectMQTT,3000); console.error(err); }
+   });
+ }
+ connectMQTT();
+ /* ====== รับข้อความ + คำนวณ + อัปเดตกราฟ ====== */
+ function onMsg(message){
+   try{
+     const obj = JSON.parse(message.payloadString); // {fsr, ts}
+     const fsr = Number(obj.fsr);
+     const kg  = parseFloat(document.getElementById('dogWeight').value);
+     if (!kg || kg <= 0 || Number.isNaN(fsr)) return;
+     // F = 100*(1 - fsr/4095)
+     const F    = 100 * (1 - fsr/4095);
+     const PVF  = 0.2 * (kg * 9.81);
+     const ratio = F / PVF;
+     // realtime (เก็บ ~60 จุด)
+     const nowLabel = new Date().toLocaleTimeString();
+     const ds = ratioChart.data.datasets[0].data;
+     const ls = ratioChart.data.labels;
+     if (ls.length > 60){ ls.shift(); ds.shift(); }
+     ls.push(nowLabel); ds.push(ratio); ratioChart.update();
+     // alert
+     alertBox.style.display = ratio > 1 ? 'block' : 'none';
+     // daily avg
+     const key = dateKey(new Date());
+     if (key !== currentDateKey) {
+       if (dailyCount > 0) {
+         const avgPrev = dailySum / dailyCount;
+         dailyAvgChart.data.labels.push(currentDateKey);
+         dailyAvgChart.data.datasets[0].data.push(avgPrev);
+         dailyAvgChart.update();
+       }
+       currentDateKey = key; dailySum=0; dailyCount=0;
+     }
+     dailySum += ratio; dailyCount++;
+     const todayAvg = dailySum / dailyCount;
+     const idx = dailyAvgChart.data.labels.indexOf(currentDateKey);
+     if (idx === -1) {
+       dailyAvgChart.data.labels.push(currentDateKey);
+     }
+     dailyAvgChart.data.datasets[0].data[idx === -1 ? dailyAvgChart.data.datasets[0].data.length : idx] = todayAvg;
+     dailyAvgChart.update();
+   }catch(e){ console.warn("Bad payload:", message.payloadString, e); }
+ }
+</script>
+</body>
+</html>
